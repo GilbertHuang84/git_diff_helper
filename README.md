@@ -31,7 +31,9 @@ GD 是一款面向开发者和 Tech Lead 的命令行工具，通过 GitLab API 
 | --- | --- |
 | `gd sync <id> --to-master` | 创建开发到主干的 MR（发布预览） |
 | `gd sync <id> --to-dev` | 创建主干到开发的 MR（回流同步） |
-| `gd tag <id> <version>` | 在指定仓库打上新 Tag |
+| `gd tag create <id> <version>` | 在仓库的默认分支上创建标签 |
+| `gd tag list <id>` | 列出仓库的标签（默认显示前10个） |
+| `gd tag ll <id>` | 快速显示仓库的所有标签 |
 
 ## 环境要求
 
@@ -110,9 +112,37 @@ gd sync <仓库ID> --to-master
 gd sync <仓库ID> --to-dev
 ```
 
-### 7. 创建标签
+### 7. 标签管理
+
+#### 创建标签（在默认分支上）
 ```bash
-gd tag <仓库ID> <版本号>
+gd tag create <仓库ID> <版本号>
+# 或使用缩写
+# gd t c <仓库ID> <版本号>
+```
+
+#### 列出标签（默认显示前10个）
+```bash
+gd tag list <仓库ID>
+# 或使用缩写
+# gd t l <仓库ID>
+```
+
+#### 快速显示所有标签
+```bash
+gd tag ll <仓库ID>
+# 或使用缩写
+# gd t ll <仓库ID>
+```
+
+**注意**：标签是在仓库的默认分支上创建的。可以通过以下命令查看或修改默认分支：
+
+```bash
+# 查看默认分支
+gd config get repos.<仓库ID>.default_branch
+
+# 修改默认分支
+gd config set repos.<仓库ID>.default_branch <分支名称>
 ```
 
 ## 配置文件结构
