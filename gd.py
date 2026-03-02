@@ -132,6 +132,13 @@ class GitLabClient:
         kwargs.setdefault('timeout', self.timeout)
         kwargs.setdefault('verify', self.verify)
         
+        # 检查是否为verbose模式
+        verbose = kwargs.pop('verbose', False)
+        if verbose:
+            console.print(f"[debug] API 地址: {url}")
+            console.print(f"[debug] 请求方法: {method}")
+            console.print(f"[debug] 请求参数: {kwargs.get('params', {})}")
+        
         try:
             response = requests.request(method, url, **kwargs)
             response.raise_for_status()
@@ -148,14 +155,14 @@ class GitLabClient:
         """获取项目信息"""
         return self._request('GET', f'/projects/{project_id}')
     
-    def compare_branches(self, project_id, source_branch, target_branch):
+    def compare_branches(self, project_id, source_branch, target_branch, verbose=False):
         """比较分支差异"""
         import urllib.parse
         # 对分支名称进行URL编码，以处理包含特殊字符的分支名称
         encoded_source = urllib.parse.quote(source_branch, safe='')
         encoded_target = urllib.parse.quote(target_branch, safe='')
         return self._request('GET', f'/projects/{project_id}/repository/compare', 
-                          params={'from': encoded_source, 'to': encoded_target})
+                          params={'from': encoded_source, 'to': encoded_target}, verbose=verbose)
     
     def get_merge_requests(self, project_id, source_branch, target_branch):
         """获取合并请求"""
@@ -404,6 +411,7 @@ class GitDiffHelper:
         
         # 确定状态：直接比较测试分支和生产分支的commit ID
         status = "[green]🟢 同步[/green]"
+        mr_link = "N/A"
         
         # 只有当测试分支和生产分支都存在且commit ID不同时，才进行详细比较
         if test_commit != "N/A" and prod_commit != "N/A" and test_commit != prod_commit:
@@ -443,6 +451,11 @@ class GitDiffHelper:
                         status = "[yellow]🟡 分歧[/yellow]"
                 else:
                     status = "[red]🔴 无法获取状态[/red]"
+            
+            # 获取合并请求链接
+            mrs = client.get_merge_requests(repo_id, test_branch, prod_branch)
+            if mrs and len(mrs) > 0:
+                mr_link = mrs[0]['web_url']
         elif test_commit == "N/A" or prod_commit == "N/A":
             # 如果测试分支或生产分支不存在，使用常见的分支名称进行比较
             # 常见的开发分支名称
@@ -500,7 +513,7 @@ class GitDiffHelper:
             elif behind > 0:
                 status = f"[red]🔴 {source_branch}落后{target_branch} {behind}个提交[/red]"
         
-        return repo_id, repo_info.get('name', '未知'), status, test_commit, prod_commit, latest_tag_commit
+        return repo_id, repo_info.get('name', '未知'), status, test_commit, prod_commit, latest_tag_commit, mr_link
     
     async def status(self, repo_id=None, verbose=False):
         """查看仓库状态"""
@@ -512,6 +525,14 @@ class GitDiffHelper:
         client = GitLabClient(global_config)
         
         if repo_id:
+            # 检查输入是否为数字ID
+            if not repo_id.isdigit():
+                # 通过名称获取仓库ID
+                repo_id = self._get_repo_id_by_name(repo_id)
+                if not repo_id:
+                    console.print(f"[red]错误: 未找到名称包含 '{repo_id}' 的仓库[/red]")
+                    return
+            
             # 查看单个仓库详情
             repo_info = self.config_manager.config.get('repos', {}).get(repo_id)
             if not repo_info:
@@ -604,23 +625,40 @@ class GitDiffHelper:
                 if target_branch_info:
                     target_commit = target_branch_info.get('commit', {}).get('id', 'N/A')[:7]
             
-            # 比较分支差异
-            compare_result = client.compare_branches(repo_id, source_branch, target_branch)
+            # 比较分支差异 - 正向比较
+            if verbose:
+                console.print(f"[debug] 调用 API: 比较分支 {source_branch} → {target_branch}")
+            compare_result = client.compare_branches(repo_id, source_branch, target_branch, verbose=verbose)
+            if verbose:
+                console.print(f"[debug] API 返回: {compare_result}")
             
-            if not compare_result:
-                # 尝试反向比较
-                compare_result = client.compare_branches(repo_id, target_branch, source_branch)
-                if not compare_result:
-                    console.print(f"[red]错误: 无法获取仓库 {repo_id} 的状态[/red]")
-                    return
+            # 比较分支差异 - 反向比较
+            if verbose:
+                console.print(f"[debug] 调用 API: 比较分支 {target_branch} → {source_branch}")
+            reverse_compare_result = client.compare_branches(repo_id, target_branch, source_branch, verbose=verbose)
+            if verbose:
+                console.print(f"[debug] API 返回: {reverse_compare_result}")
+            
+            # 处理比较结果
+            if compare_result:
+                # 确保ahead_count和behind_count存在
+                ahead = compare_result.get('ahead_count', 0)
+                behind = compare_result.get('behind_count', 0)
+                # 检查是否存在文件差异
+                has_diffs = len(compare_result.get('diffs', [])) > 0
+            elif reverse_compare_result:
+                # 如果正向比较失败，使用反向比较结果
+                ahead = reverse_compare_result.get('ahead_count', 0)
+                behind = reverse_compare_result.get('behind_count', 0)
+                # 检查是否存在文件差异
+                has_diffs = len(reverse_compare_result.get('diffs', [])) > 0
                 # 交换分支名称，因为我们是反向比较的
                 source_branch, target_branch = target_branch, source_branch
                 # 交换commit ID
                 source_commit, target_commit = target_commit, source_commit
-            
-            # 确保ahead_count和behind_count存在
-            ahead = compare_result.get('ahead_count', 0)
-            behind = compare_result.get('behind_count', 0)
+            else:
+                console.print(f"[red]错误: 无法获取仓库 {repo_id} 的状态[/red]")
+                return
             
             console.print(f"[bold]仓库:[/bold] {repo_info.get('name', '未知')} (ID: {repo_id})")
             console.print(f"[bold]默认分支:[/bold] {default_branch}")
@@ -628,9 +666,13 @@ class GitDiffHelper:
             console.print(f"[bold]{source_branch} 领先:[/bold] {ahead} 个提交")
             console.print(f"[bold]{source_branch} 落后:[/bold] {behind} 个提交")
             
-            # 如果commit ID不同但ahead和behind都为0，显示为分歧
-            if source_commit != "N/A" and target_commit != "N/A" and source_commit != target_commit and ahead == 0 and behind == 0:
-                console.print("[yellow]🟡 注意: 分支commit ID不同，但GitLab API返回的差异为0，可能存在分歧[/yellow]")
+            # 如果commit ID不同或存在文件差异，显示为分歧
+            if (source_commit != "N/A" and target_commit != "N/A" and source_commit != target_commit) or has_diffs:
+                console.print("[yellow]🟡 注意: 分支存在差异，可能需要同步[/yellow]")
+                # 显示差异文件数量
+                if has_diffs:
+                    diff_count = len(compare_result.get('diffs', [])) if compare_result else len(reverse_compare_result.get('diffs', []))
+                    console.print(f"[yellow]差异文件数量: {diff_count}[/yellow]")
             
             # 显示提交列表
             if compare_result.get('commits'):
@@ -685,9 +727,10 @@ class GitDiffHelper:
             table.add_column("测试分支", style="yellow")
             table.add_column("生产分支", style="yellow")
             table.add_column("最新Tag", style="yellow")
+            table.add_column("MR链接", style="blue")
             
             for result in results:
-                table.add_row(result[0], result[1], result[2], result[3], result[4], result[5])
+                table.add_row(result[0], result[1], result[2], result[3], result[4], result[5], result[6])
             
             console.print(table)
             
