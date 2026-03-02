@@ -150,8 +150,12 @@ class GitLabClient:
     
     def compare_branches(self, project_id, source_branch, target_branch):
         """比较分支差异"""
+        import urllib.parse
+        # 对分支名称进行URL编码，以处理包含特殊字符的分支名称
+        encoded_source = urllib.parse.quote(source_branch, safe='')
+        encoded_target = urllib.parse.quote(target_branch, safe='')
         return self._request('GET', f'/projects/{project_id}/repository/compare', 
-                          params={'from': source_branch, 'to': target_branch})
+                          params={'from': encoded_source, 'to': encoded_target})
     
     def get_merge_requests(self, project_id, source_branch, target_branch):
         """获取合并请求"""
@@ -398,62 +402,103 @@ class GitDiffHelper:
             latest_tag = tags[0]  # GitLab API按创建时间降序返回
             latest_tag_commit = latest_tag.get('commit', {}).get('id', 'N/A')[:7]
         
-        # 常见的开发分支名称
-        dev_branches = ['develop', 'dev', 'development', 'feature']
-        # 常见的主分支名称
-        main_branches = ['master', 'main', 'prod', 'production']
+        # 确定状态：直接比较测试分支和生产分支的commit ID
+        status = "[green]🟢 同步[/green]"
         
-        # 找出所有开发分支和主分支
-        found_dev_branches = [b for b in branch_names if b in dev_branches]
-        found_main_branches = [b for b in branch_names if b in main_branches]
-        
-        # 如果没有找到开发分支或主分支，使用第一个分支作为主分支
-        if not found_dev_branches:
-            if branch_names:
-                found_dev_branches = [branch_names[0]]
+        # 只有当测试分支和生产分支都存在且commit ID不同时，才进行详细比较
+        if test_commit != "N/A" and prod_commit != "N/A" and test_commit != prod_commit:
+            # 比较分支差异
+            compare_result = client.compare_branches(repo_id, test_branch, prod_branch)
+            
+            if compare_result:
+                # 确保ahead_count和behind_count存在
+                ahead = compare_result.get('ahead_count', 0)
+                behind = compare_result.get('behind_count', 0)
+                
+                if ahead > 0 and behind > 0:
+                    status = "[yellow]🟡 分歧[/yellow]"
+                elif ahead > 0:
+                    status = f"[blue]🔵 {test_branch}领先{prod_branch} {ahead}个提交[/blue]"
+                elif behind > 0:
+                    status = f"[red]🔴 {test_branch}落后{prod_branch} {behind}个提交[/red]"
+                else:
+                    # 如果ahead和behind都为0，但commit ID不同，显示为分歧
+                    status = "[yellow]🟡 分歧[/yellow]"
             else:
-                return repo_id, repo_info.get('name', '未知'), "[red]🔴 缺少必要的分支[/red]", test_commit, prod_commit, latest_tag_commit
-        
-        if not found_main_branches:
-            if branch_names:
-                # 选择不是开发分支的第一个分支作为主分支
-                for b in branch_names:
-                    if b not in dev_branches:
-                        found_main_branches = [b]
-                        break
-                # 如果所有分支都是开发分支，使用第一个作为主分支
-                if not found_main_branches:
-                    found_main_branches = [branch_names[0]]
-            else:
-                return repo_id, repo_info.get('name', '未知'), "[red]🔴 缺少必要的分支[/red]", test_commit, prod_commit, latest_tag_commit
-        
-        # 选择第一个开发分支和第一个主分支进行比较
-        source_branch = found_dev_branches[0]
-        target_branch = found_main_branches[0]
-        
-        # 比较分支差异
-        compare_result = client.compare_branches(repo_id, source_branch, target_branch)
-        
-        if not compare_result:
-            # 尝试反向比较
-            compare_result = client.compare_branches(repo_id, target_branch, source_branch)
+                # 尝试反向比较
+                compare_result = client.compare_branches(repo_id, prod_branch, test_branch)
+                if compare_result:
+                    # 确保ahead_count和behind_count存在
+                    ahead = compare_result.get('ahead_count', 0)
+                    behind = compare_result.get('behind_count', 0)
+                    
+                    if ahead > 0 and behind > 0:
+                        status = "[yellow]🟡 分歧[/yellow]"
+                    elif ahead > 0:
+                        status = f"[blue]🔵 {prod_branch}领先{test_branch} {ahead}个提交[/blue]"
+                    elif behind > 0:
+                        status = f"[red]🔴 {prod_branch}落后{test_branch} {behind}个提交[/red]"
+                    else:
+                        # 如果ahead和behind都为0，但commit ID不同，显示为分歧
+                        status = "[yellow]🟡 分歧[/yellow]"
+                else:
+                    status = "[red]🔴 无法获取状态[/red]"
+        elif test_commit == "N/A" or prod_commit == "N/A":
+            # 如果测试分支或生产分支不存在，使用常见的分支名称进行比较
+            # 常见的开发分支名称
+            dev_branches = ['develop', 'dev', 'development', 'feature']
+            # 常见的主分支名称
+            main_branches = ['master', 'main', 'prod', 'production']
+            
+            # 找出所有开发分支和主分支
+            found_dev_branches = [b for b in branch_names if b in dev_branches]
+            found_main_branches = [b for b in branch_names if b in main_branches]
+            
+            # 如果没有找到开发分支或主分支，使用第一个分支作为主分支
+            if not found_dev_branches:
+                if branch_names:
+                    found_dev_branches = [branch_names[0]]
+                else:
+                    return repo_id, repo_info.get('name', '未知'), "[red]🔴 缺少必要的分支[/red]", test_commit, prod_commit, latest_tag_commit
+            
+            if not found_main_branches:
+                if branch_names:
+                    # 选择不是开发分支的第一个分支作为主分支
+                    for b in branch_names:
+                        if b not in dev_branches:
+                            found_main_branches = [b]
+                            break
+                    # 如果所有分支都是开发分支，使用第一个作为主分支
+                    if not found_main_branches:
+                        found_main_branches = [branch_names[0]]
+                else:
+                    return repo_id, repo_info.get('name', '未知'), "[red]🔴 缺少必要的分支[/red]", test_commit, prod_commit, latest_tag_commit
+            
+            # 选择第一个开发分支和第一个主分支进行比较
+            source_branch = found_dev_branches[0]
+            target_branch = found_main_branches[0]
+            
+            # 比较分支差异
+            compare_result = client.compare_branches(repo_id, source_branch, target_branch)
+            
             if not compare_result:
-                return repo_id, repo_info.get('name', '未知'), "[red]🔴 无法获取状态[/red]", test_commit, prod_commit, latest_tag_commit
-            # 交换分支名称，因为我们是反向比较的
-            source_branch, target_branch = target_branch, source_branch
-        
-        # 确保ahead_count和behind_count存在
-        ahead = compare_result.get('ahead_count', 0)
-        behind = compare_result.get('behind_count', 0)
-        
-        if ahead > 0 and behind > 0:
-            status = "[yellow]🟡 分歧[/yellow]"
-        elif ahead > 0:
-            status = f"[blue]🔵 {source_branch}领先{target_branch} {ahead}个提交[/blue]"
-        elif behind > 0:
-            status = f"[red]🔴 {source_branch}落后{target_branch} {behind}个提交[/red]"
-        else:
-            status = "[green]🟢 同步[/green]"
+                # 尝试反向比较
+                compare_result = client.compare_branches(repo_id, target_branch, source_branch)
+                if not compare_result:
+                    return repo_id, repo_info.get('name', '未知'), "[red]🔴 无法获取状态[/red]", test_commit, prod_commit, latest_tag_commit
+                # 交换分支名称，因为我们是反向比较的
+                source_branch, target_branch = target_branch, source_branch
+            
+            # 确保ahead_count和behind_count存在
+            ahead = compare_result.get('ahead_count', 0)
+            behind = compare_result.get('behind_count', 0)
+            
+            if ahead > 0 and behind > 0:
+                status = "[yellow]🟡 分歧[/yellow]"
+            elif ahead > 0:
+                status = f"[blue]🔵 {source_branch}领先{target_branch} {ahead}个提交[/blue]"
+            elif behind > 0:
+                status = f"[red]🔴 {source_branch}落后{target_branch} {behind}个提交[/red]"
         
         return repo_id, repo_info.get('name', '未知'), status, test_commit, prod_commit, latest_tag_commit
     
@@ -475,6 +520,8 @@ class GitDiffHelper:
             
             repo_config = self.config_manager.get_repo_config(repo_id)
             default_branch = repo_config.get('default_branch', 'master')
+            test_branch = repo_config.get('test_branch', 'develop')
+            prod_branch = repo_config.get('prod_branch', 'master')
             
             # 获取仓库的实际分支
             branches = client.get_branches(repo_id)
@@ -493,32 +540,69 @@ class GitDiffHelper:
                 console.print(f"  路径: {repo_info.get('path', '未知')}")
                 console.print(f"  分组: {repo_info.get('group', '无')}")
                 console.print(f"  默认分支: {default_branch}")
+                console.print(f"  测试分支: {test_branch}")
+                console.print(f"  生产分支: {prod_branch}")
                 console.print(f"  所有分支: {', '.join(branch_names)}")
                 console.print()
             
-            # 确定要比较的分支
-            source_branch = 'develop' if 'develop' in branch_names else None
-            target_branch = default_branch if default_branch in branch_names else None
+            # 确定要比较的分支：优先使用配置的测试分支和生产分支
+            source_branch = None
+            target_branch = None
             
-            # 如果没有找到develop分支，尝试其他常见的开发分支名称
-            if not source_branch:
-                for branch_name in ['dev', 'development', 'feature']:
-                    if branch_name in branch_names:
-                        source_branch = branch_name
-                        break
+            # 检查配置的测试分支和生产分支是否存在
+            if test_branch in branch_names and prod_branch in branch_names:
+                source_branch = test_branch
+                target_branch = prod_branch
+            else:
+                # 如果配置的分支不存在，使用常见的分支名称
+                # 常见的开发分支名称
+                dev_branches = ['develop', 'dev', 'development', 'feature']
+                # 常见的主分支名称
+                main_branches = ['master', 'main', 'prod', 'production']
+                
+                # 找出所有开发分支和主分支
+                found_dev_branches = [b for b in branch_names if b in dev_branches]
+                found_main_branches = [b for b in branch_names if b in main_branches]
+                
+                # 如果没有找到开发分支或主分支，使用第一个分支作为主分支
+                if not found_dev_branches:
+                    if branch_names:
+                        found_dev_branches = [branch_names[0]]
+                    else:
+                        console.print(f"[red]错误: 仓库 {repo_id} 缺少必要的分支[/red]")
+                        return
+                
+                if not found_main_branches:
+                    if branch_names:
+                        # 选择不是开发分支的第一个分支作为主分支
+                        for b in branch_names:
+                            if b not in dev_branches:
+                                found_main_branches = [b]
+                                break
+                        # 如果所有分支都是开发分支，使用第一个作为主分支
+                        if not found_main_branches:
+                            found_main_branches = [branch_names[0]]
+                    else:
+                        console.print(f"[red]错误: 仓库 {repo_id} 缺少必要的分支[/red]")
+                        return
+                
+                # 选择第一个开发分支和第一个主分支进行比较
+                source_branch = found_dev_branches[0]
+                target_branch = found_main_branches[0]
             
-            # 如果没有找到默认分支，尝试main分支
-            if not target_branch:
-                if 'main' in branch_names:
-                    target_branch = 'main'
-                elif branch_names:
-                    # 使用第一个分支作为目标分支
-                    target_branch = branch_names[0]
+            # 获取分支的commit ID
+            source_commit = "N/A"
+            target_commit = "N/A"
             
-            # 如果仍然没有找到合适的分支，返回错误
-            if not source_branch or not target_branch:
-                console.print(f"[red]错误: 仓库 {repo_id} 缺少必要的分支[/red]")
-                return
+            if source_branch in branch_names:
+                source_branch_info = next((b for b in branches if b['name'] == source_branch), None)
+                if source_branch_info:
+                    source_commit = source_branch_info.get('commit', {}).get('id', 'N/A')[:7]
+            
+            if target_branch in branch_names:
+                target_branch_info = next((b for b in branches if b['name'] == target_branch), None)
+                if target_branch_info:
+                    target_commit = target_branch_info.get('commit', {}).get('id', 'N/A')[:7]
             
             # 比较分支差异
             compare_result = client.compare_branches(repo_id, source_branch, target_branch)
@@ -531,6 +615,8 @@ class GitDiffHelper:
                     return
                 # 交换分支名称，因为我们是反向比较的
                 source_branch, target_branch = target_branch, source_branch
+                # 交换commit ID
+                source_commit, target_commit = target_commit, source_commit
             
             # 确保ahead_count和behind_count存在
             ahead = compare_result.get('ahead_count', 0)
@@ -538,9 +624,13 @@ class GitDiffHelper:
             
             console.print(f"[bold]仓库:[/bold] {repo_info.get('name', '未知')} (ID: {repo_id})")
             console.print(f"[bold]默认分支:[/bold] {default_branch}")
-            console.print(f"[bold]比较分支:[/bold] {source_branch} → {target_branch}")
+            console.print(f"[bold]比较分支:[/bold] {source_branch} ({source_commit}) → {target_branch} ({target_commit})")
             console.print(f"[bold]{source_branch} 领先:[/bold] {ahead} 个提交")
             console.print(f"[bold]{source_branch} 落后:[/bold] {behind} 个提交")
+            
+            # 如果commit ID不同但ahead和behind都为0，显示为分歧
+            if source_commit != "N/A" and target_commit != "N/A" and source_commit != target_commit and ahead == 0 and behind == 0:
+                console.print("[yellow]🟡 注意: 分支commit ID不同，但GitLab API返回的差异为0，可能存在分歧[/yellow]")
             
             # 显示提交列表
             if compare_result.get('commits'):
@@ -667,8 +757,16 @@ class GitDiffHelper:
                             else:
                                 console.print(f"    {branch_type}: 无")
     
-    def sync(self, repo_id, to_master=True):
+    def sync(self, repo_id, to_prod=True):
         """同步仓库并创建MR"""
+        # 检查输入是否为数字ID
+        if not repo_id.isdigit():
+            # 通过名称获取仓库ID
+            repo_id = self._get_repo_id_by_name(repo_id)
+            if not repo_id:
+                console.print(f"[red]错误: 未找到名称包含 '{repo_id}' 的仓库[/red]")
+                return
+        
         global_config = self.config_manager.config['global']
         if not global_config.get('token') or not global_config.get('gitlab_url'):
             console.print("[red]错误: 请先配置GitLab URL和Token[/red]")
@@ -683,13 +781,15 @@ class GitDiffHelper:
         
         repo_config = self.config_manager.get_repo_config(repo_id)
         default_branch = repo_config.get('default_branch', 'master')
+        test_branch = repo_config.get('test_branch', 'develop')
+        prod_branch = repo_config.get('prod_branch', 'master')
         
-        if to_master:
-            source_branch = 'develop'
-            target_branch = default_branch
+        if to_prod:
+            source_branch = test_branch
+            target_branch = prod_branch
         else:
-            source_branch = default_branch
-            target_branch = 'develop'
+            source_branch = prod_branch
+            target_branch = test_branch
         
         # 检查是否存在未关闭的MR
         mrs = client.get_merge_requests(repo_id, source_branch, target_branch)
@@ -697,6 +797,18 @@ class GitDiffHelper:
         if mrs and len(mrs) > 0:
             console.print(f"[yellow]已存在未关闭的MR:[/yellow] {mrs[0]['web_url']}")
             return
+        
+        # 获取分支的commit ID
+        branches = client.get_branches(repo_id)
+        source_commit = "N/A"
+        target_commit = "N/A"
+        
+        if branches:
+            for branch in branches:
+                if branch['name'] == source_branch:
+                    source_commit = branch.get('commit', {}).get('id', 'N/A')[:7]
+                elif branch['name'] == target_branch:
+                    target_commit = branch.get('commit', {}).get('id', 'N/A')[:7]
         
         # 检查分支差异
         compare_result = client.compare_branches(repo_id, source_branch, target_branch)
@@ -707,9 +819,13 @@ class GitDiffHelper:
         
         ahead = compare_result.get('ahead_count', 0)
         
-        if ahead == 0:
+        # 检查分支是否已经同步：如果ahead为0且commit ID相同，则认为已经同步
+        if ahead == 0 and source_commit != "N/A" and target_commit != "N/A" and source_commit == target_commit:
             console.print("[green]分支已经同步，无需创建MR[/green]")
             return
+        elif ahead == 0 and source_commit != target_commit:
+            # 如果ahead为0但commit ID不同，仍然创建MR
+            console.print("[yellow]注意: 分支commit ID不同，但GitLab API返回的差异为0，仍然创建MR[/yellow]")
         
         # 生成MR描述
         description = "## 自动创建的同步MR\n\n"
@@ -1097,8 +1213,8 @@ def main():
     # sync命令
     sync_parser = subparsers.add_parser('sync', help='同步仓库并创建MR (缩写: sy)')
     sync_parser.add_argument('id', help='仓库ID')
-    sync_parser.add_argument('--to-master', action='store_true', default=True, help='同步到master分支')
-    sync_parser.add_argument('--to-dev', action='store_false', dest='to_master', help='同步到develop分支')
+    sync_parser.add_argument('--to-prod', action='store_true', default=True, help='同步到生产分支')
+    sync_parser.add_argument('--to-dev', action='store_false', dest='to_prod', help='同步到测试分支')
     
     # tag命令
     tag_parser = subparsers.add_parser('tag', help='标签管理 (缩写: t)')
@@ -1177,7 +1293,7 @@ def main():
     elif args.command == 'status':
             asyncio.run(helper.status(args.id, args.verbose))
     elif args.command == 'sync':
-        helper.sync(args.id, args.to_master)
+        helper.sync(args.id, args.to_prod)
     elif args.command == 'tag':
         if args.tag_command == 'create':
             helper.tag_create(args.id, args.version)
