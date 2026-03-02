@@ -60,6 +60,8 @@ class ConfigManager:
                     config['groups'] = {}
                 if 'repos' not in config:
                     config['repos'] = {}
+                if 'current_group' not in config:
+                    config['current_group'] = ''
                 return config
         # 创建默认配置
         default_config = {
@@ -69,7 +71,8 @@ class ConfigManager:
                 'default_branch': 'master'
             },
             'groups': {},
-            'repos': {}
+            'repos': {},
+            'current_group': ''
         }
         # 保存默认配置到文件
         self.save_config(default_config)
@@ -177,6 +180,10 @@ class GitLabClient:
     def get_tags(self, project_id):
         """获取标签列表"""
         return self._request('GET', f'/projects/{project_id}/repository/tags', params={'per_page': 100})
+    
+    def get_branches(self, project_id):
+        """获取分支列表"""
+        return self._request('GET', f'/projects/{project_id}/repository/branches', params={'per_page': 100})
 
 class GitDiffHelper:
     """GitDiffHelper主类"""
@@ -215,22 +222,61 @@ class GitDiffHelper:
             return
         
         client = GitLabClient(config)
-        project = client.get_project(repo_id)
         
-        if not project:
-            console.print(f"[red]错误: 无法获取仓库ID {repo_id} 的信息[/red]")
-            return
+        # 检查输入是否为数字ID
+        if repo_id.isdigit():
+            # 通过ID获取仓库
+            project = client.get_project(repo_id)
+            
+            if not project:
+                console.print(f"[red]错误: 无法获取仓库ID {repo_id} 的信息[/red]")
+                return
+            
+            selected_project = project
+        else:
+            # 通过名称搜索仓库
+            projects = client.search_projects(repo_id)
+            
+            if not projects:
+                console.print(f"[red]错误: 未找到名称包含 '{repo_id}' 的仓库[/red]")
+                return
+            
+            # 如果只有一个结果，直接使用
+            if len(projects) == 1:
+                selected_project = projects[0]
+            else:
+                # 列出多个结果让用户选择
+                console.print("[blue]找到多个匹配的仓库，请选择:[/blue]")
+                for i, project in enumerate(projects, 1):
+                    console.print(f"{i}. {project['name']} (ID: {project['id']}) - {project['path_with_namespace']}")
+                
+                # 获取用户选择
+                while True:
+                    try:
+                        choice = int(input("请输入序号: "))
+                        if 1 <= choice <= len(projects):
+                            selected_project = projects[choice - 1]
+                            break
+                        else:
+                            console.print("[yellow]输入无效，请输入正确的序号[/yellow]")
+                    except ValueError:
+                        console.print("[yellow]输入无效，请输入数字[/yellow]")
         
         if 'repos' not in self.config_manager.config:
             self.config_manager.config['repos'] = {}
         
-        self.config_manager.config['repos'][repo_id] = {
-            'name': project['name'],
-            'path': project['path_with_namespace']
+        # 如果没有指定分组，使用当前分组
+        if not group:
+            group = self.config_manager.config.get('current_group', '')
+        
+        project_id = str(selected_project['id'])
+        self.config_manager.config['repos'][project_id] = {
+            'name': selected_project['name'],
+            'path': selected_project['path_with_namespace']
         }
         
         if group:
-            self.config_manager.config['repos'][repo_id]['group'] = group
+            self.config_manager.config['repos'][project_id]['group'] = group
             # 确保组存在
             if 'groups' not in self.config_manager.config:
                 self.config_manager.config['groups'] = {}
@@ -238,7 +284,29 @@ class GitDiffHelper:
                 self.config_manager.config['groups'][group] = {}
         
         self.config_manager.save()
-        console.print(f"[green]成功添加仓库: {project['name']} (ID: {repo_id})[/green]")
+        console.print(f"[green]成功添加仓库: {selected_project['name']} (ID: {project_id})[/green]")
+    
+    def group_set(self, group_name):
+        """设置当前分组"""
+        groups = self.config_manager.config.get('groups', {})
+        
+        if group_name not in groups:
+            console.print(f"[red]错误: 分组 {group_name} 不存在[/red]")
+            return
+        
+        self.config_manager.config['current_group'] = group_name
+        self.config_manager.save()
+        
+        console.print(f"[green]成功设置当前分组: {group_name}[/green]")
+    
+    def group_current(self):
+        """查看当前分组"""
+        current_group = self.config_manager.config.get('current_group', '')
+        
+        if current_group:
+            console.print(f"[green]当前分组: {current_group}[/green]")
+        else:
+            console.print("[yellow]未设置当前分组[/yellow]")
     
     def list(self):
         """列出所有仓库"""
@@ -299,27 +367,74 @@ class GitDiffHelper:
         repo_config = self.config_manager.get_repo_config(repo_id)
         default_branch = repo_config.get('default_branch', 'master')
         
-        # 检查develop和master分支的差异
-        compare_result = client.compare_branches(repo_id, 'develop', default_branch)
+        # 获取仓库的实际分支
+        branches = client.get_branches(repo_id)
+        if not branches:
+            return repo_id, repo_info.get('name', '未知'), "[red]🔴 无法获取分支信息[/red]"
+        
+        # 提取分支名称列表
+        branch_names = [branch['name'] for branch in branches]
+        
+        # 常见的开发分支名称
+        dev_branches = ['develop', 'dev', 'development', 'feature']
+        # 常见的主分支名称
+        main_branches = ['master', 'main', 'prod', 'production']
+        
+        # 找出所有开发分支和主分支
+        found_dev_branches = [b for b in branch_names if b in dev_branches]
+        found_main_branches = [b for b in branch_names if b in main_branches]
+        
+        # 如果没有找到开发分支或主分支，使用第一个分支作为主分支
+        if not found_dev_branches:
+            if branch_names:
+                found_dev_branches = [branch_names[0]]
+            else:
+                return repo_id, repo_info.get('name', '未知'), "[red]🔴 缺少必要的分支[/red]"
+        
+        if not found_main_branches:
+            if branch_names:
+                # 选择不是开发分支的第一个分支作为主分支
+                for b in branch_names:
+                    if b not in dev_branches:
+                        found_main_branches = [b]
+                        break
+                # 如果所有分支都是开发分支，使用第一个作为主分支
+                if not found_main_branches:
+                    found_main_branches = [branch_names[0]]
+            else:
+                return repo_id, repo_info.get('name', '未知'), "[red]🔴 缺少必要的分支[/red]"
+        
+        # 选择第一个开发分支和第一个主分支进行比较
+        source_branch = found_dev_branches[0]
+        target_branch = found_main_branches[0]
+        
+        # 比较分支差异
+        compare_result = client.compare_branches(repo_id, source_branch, target_branch)
         
         if not compare_result:
-            return repo_id, repo_info.get('name', '未知'), "[red]🔴 无法获取状态[/red]"
+            # 尝试反向比较
+            compare_result = client.compare_branches(repo_id, target_branch, source_branch)
+            if not compare_result:
+                return repo_id, repo_info.get('name', '未知'), "[red]🔴 无法获取状态[/red]"
+            # 交换分支名称，因为我们是反向比较的
+            source_branch, target_branch = target_branch, source_branch
         
+        # 确保ahead_count和behind_count存在
         ahead = compare_result.get('ahead_count', 0)
         behind = compare_result.get('behind_count', 0)
         
         if ahead > 0 and behind > 0:
             status = "[yellow]🟡 分歧[/yellow]"
         elif ahead > 0:
-            status = "[blue]🔵 领先[/blue]"
+            status = f"[blue]🔵 {source_branch}领先{target_branch} {ahead}个提交[/blue]"
         elif behind > 0:
-            status = "[red]🔴 落后[/red]"
+            status = f"[red]🔴 {source_branch}落后{target_branch} {behind}个提交[/red]"
         else:
             status = "[green]🟢 同步[/green]"
         
         return repo_id, repo_info.get('name', '未知'), status
     
-    async def status(self, repo_id=None):
+    async def status(self, repo_id=None, verbose=False):
         """查看仓库状态"""
         global_config = self.config_manager.config['global']
         if not global_config.get('token') or not global_config.get('gitlab_url'):
@@ -338,17 +453,71 @@ class GitDiffHelper:
             repo_config = self.config_manager.get_repo_config(repo_id)
             default_branch = repo_config.get('default_branch', 'master')
             
-            # 获取差异
-            compare_result = client.compare_branches(repo_id, 'develop', default_branch)
+            # 获取仓库的实际分支
+            branches = client.get_branches(repo_id)
+            if not branches:
+                console.print(f"[red]错误: 无法获取仓库 {repo_id} 的分支信息[/red]")
+                return
+            
+            # 提取分支名称列表
+            branch_names = [branch['name'] for branch in branches]
+            
+            # 显示详细信息
+            if verbose:
+                console.print(f"[bold]仓库信息:[/bold]")
+                console.print(f"  名称: {repo_info.get('name', '未知')}")
+                console.print(f"  ID: {repo_id}")
+                console.print(f"  路径: {repo_info.get('path', '未知')}")
+                console.print(f"  分组: {repo_info.get('group', '无')}")
+                console.print(f"  默认分支: {default_branch}")
+                console.print(f"  所有分支: {', '.join(branch_names)}")
+                console.print()
+            
+            # 确定要比较的分支
+            source_branch = 'develop' if 'develop' in branch_names else None
+            target_branch = default_branch if default_branch in branch_names else None
+            
+            # 如果没有找到develop分支，尝试其他常见的开发分支名称
+            if not source_branch:
+                for branch_name in ['dev', 'development', 'feature']:
+                    if branch_name in branch_names:
+                        source_branch = branch_name
+                        break
+            
+            # 如果没有找到默认分支，尝试main分支
+            if not target_branch:
+                if 'main' in branch_names:
+                    target_branch = 'main'
+                elif branch_names:
+                    # 使用第一个分支作为目标分支
+                    target_branch = branch_names[0]
+            
+            # 如果仍然没有找到合适的分支，返回错误
+            if not source_branch or not target_branch:
+                console.print(f"[red]错误: 仓库 {repo_id} 缺少必要的分支[/red]")
+                return
+            
+            # 比较分支差异
+            compare_result = client.compare_branches(repo_id, source_branch, target_branch)
             
             if not compare_result:
-                console.print(f"[red]错误: 无法获取仓库 {repo_id} 的状态[/red]")
-                return
+                # 尝试反向比较
+                compare_result = client.compare_branches(repo_id, target_branch, source_branch)
+                if not compare_result:
+                    console.print(f"[red]错误: 无法获取仓库 {repo_id} 的状态[/red]")
+                    return
+                # 交换分支名称，因为我们是反向比较的
+                source_branch, target_branch = target_branch, source_branch
+            
+            # 确保ahead_count和behind_count存在
+            ahead = compare_result.get('ahead_count', 0)
+            behind = compare_result.get('behind_count', 0)
             
             console.print(f"[bold]仓库:[/bold] {repo_info.get('name', '未知')} (ID: {repo_id})")
             console.print(f"[bold]默认分支:[/bold] {default_branch}")
-            console.print(f"[bold]Develop 领先:[/bold] {compare_result.get('ahead_count', 0)} 个提交")
-            console.print(f"[bold]Develop 落后:[/bold] {compare_result.get('behind_count', 0)} 个提交")
+            console.print(f"[bold]比较分支:[/bold] {source_branch} → {target_branch}")
+            console.print(f"[bold]{source_branch} 领先:[/bold] {ahead} 个提交")
+            console.print(f"[bold]{source_branch} 落后:[/bold] {behind} 个提交")
             
             # 显示提交列表
             if compare_result.get('commits'):
@@ -391,6 +560,56 @@ class GitDiffHelper:
                 table.add_row(result[0], result[1], result[2])
             
             console.print(table)
+            
+            # 显示详细信息
+            if verbose:
+                console.print("\n[bold]详细信息:[/bold]")
+                for repo_id, repo_info in repos.items():
+                    repo_config = self.config_manager.get_repo_config(repo_id)
+                    default_branch = repo_config.get('default_branch', 'master')
+                    console.print(f"\n[bold]{repo_info.get('name', '未知')} (ID: {repo_id})[/bold]")
+                    console.print(f"  路径: {repo_info.get('path', '未知')}")
+                    console.print(f"  分组: {repo_info.get('group', '无')}")
+                    console.print(f"  默认分支: {default_branch}")
+                    
+                    # 获取仓库的实际分支
+                    branches = client.get_branches(repo_id)
+                    if branches:
+                        branch_names = [branch['name'] for branch in branches]
+                        console.print(f"  分支数量: {len(branch_names)}")
+                        if len(branch_names) <= 10:
+                            console.print(f"  分支: {', '.join(branch_names)}")
+                        else:
+                            console.print(f"  分支: {', '.join(branch_names[:5])}... 等 {len(branch_names)} 个分支")
+                    
+                    # 显示测试分支和生产分支的配置及commit id
+                    console.print("  分支配置:")
+                    
+                    # 常见的分支类型
+                    branch_types = {
+                        '测试分支': ['develop', 'dev', 'development', 'feature'],
+                        '生产分支': ['master', 'main', 'prod', 'production']
+                    }
+                    
+                    for branch_type, branch_patterns in branch_types.items():
+                        # 找到匹配的分支
+                        matching_branches = []
+                        for branch in branch_names:
+                            if any(pattern in branch for pattern in branch_patterns):
+                                matching_branches.append(branch)
+                        
+                        if matching_branches:
+                            console.print(f"    {branch_type}:")
+                            for branch in matching_branches[:3]:  # 只显示前3个
+                                # 获取分支的最新commit id
+                                branch_info = next((b for b in branches if b['name'] == branch), None)
+                                if branch_info:
+                                    commit_id = branch_info.get('commit', {}).get('id', 'N/A')[:7]
+                                    console.print(f"      - {branch} (commit: {commit_id})")
+                            if len(matching_branches) > 3:
+                                console.print(f"      ... 等 {len(matching_branches)} 个分支")
+                        else:
+                            console.print(f"    {branch_type}: 无")
     
     def sync(self, repo_id, to_master=True):
         """同步仓库并创建MR"""
@@ -485,15 +704,59 @@ class GitDiffHelper:
         """删除仓库"""
         repos = self.config_manager.config.get('repos', {})
         
-        if repo_id not in repos:
-            console.print(f"[red]错误: 仓库ID {repo_id} 未配置[/red]")
+        # 检查输入是否为数字ID
+        if repo_id.isdigit():
+            # 通过ID删除仓库
+            if repo_id not in repos:
+                console.print(f"[red]错误: 仓库ID {repo_id} 未配置[/red]")
+                return
+            
+            selected_repo_id = repo_id
+            repo_name = repos[selected_repo_id].get('name', '未知')
+        else:
+            # 通过名称搜索仓库
+            matching_repos = []
+            for r_id, r_info in repos.items():
+                if repo_id.lower() in r_info.get('name', '').lower():
+                    matching_repos.append((r_id, r_info))
+            
+            if not matching_repos:
+                console.print(f"[red]错误: 未找到名称包含 '{repo_id}' 的仓库[/red]")
+                return
+            
+            # 如果只有一个结果，直接使用
+            if len(matching_repos) == 1:
+                selected_repo_id, repo_info = matching_repos[0]
+                repo_name = repo_info.get('name', '未知')
+            else:
+                # 列出多个结果让用户选择
+                console.print("[blue]找到多个匹配的仓库，请选择:[/blue]")
+                for i, (r_id, r_info) in enumerate(matching_repos, 1):
+                    console.print(f"{i}. {r_info.get('name', '未知')} (ID: {r_id}) - {r_info.get('path', '未知')}")
+                
+                # 获取用户选择
+                while True:
+                    try:
+                        choice = int(input("请输入序号: "))
+                        if 1 <= choice <= len(matching_repos):
+                            selected_repo_id, repo_info = matching_repos[choice - 1]
+                            repo_name = repo_info.get('name', '未知')
+                            break
+                        else:
+                            console.print("[yellow]输入无效，请输入正确的序号[/yellow]")
+                    except ValueError:
+                        console.print("[yellow]输入无效，请输入数字[/yellow]")
+        
+        # 要求用户确认
+        confirm = input(f"确定要删除仓库 {repo_name} (ID: {selected_repo_id}) 吗？(y/n): ")
+        if confirm.lower() != 'y':
+            console.print("[yellow]取消删除操作[/yellow]")
             return
         
-        repo_name = repos[repo_id].get('name', '未知')
-        del self.config_manager.config['repos'][repo_id]
+        del self.config_manager.config['repos'][selected_repo_id]
         self.config_manager.save()
         
-        console.print(f"[green]成功删除仓库: {repo_name} (ID: {repo_id})[/green]")
+        console.print(f"[green]成功删除仓库: {repo_name} (ID: {selected_repo_id})[/green]")
     
     def group_add(self, group_name):
         """创建分组"""
@@ -549,6 +812,12 @@ class GitDiffHelper:
         if repo_count > 0:
             console.print(f"[yellow]警告: 分组 {group_name} 中还有 {repo_count} 个仓库，删除分组后这些仓库将变为无分组状态[/yellow]")
         
+        # 要求用户确认
+        confirm = input(f"确定要删除分组 {group_name} 吗？(y/n): ")
+        if confirm.lower() != 'y':
+            console.print("[yellow]取消删除操作[/yellow]")
+            return
+        
         # 删除分组
         del self.config_manager.config['groups'][group_name]
         
@@ -563,8 +832,40 @@ class GitDiffHelper:
 
 def main():
     """主函数"""
+    # 命令别名映射
+    command_aliases = {
+        's': 'search',
+        'a': 'add',
+        'ls': 'list',
+        'v': 'verify',
+        'st': 'status',
+        'sy': 'sync',
+        't': 'tag',
+        'r': 'rm',
+        'g': 'group'
+    }
+    
+    # 分组子命令别名映射
+    group_command_aliases = {
+        'a': 'add',
+        'ls': 'list',
+        'r': 'rm',
+        's': 'set',
+        'c': 'current'
+    }
+    
+    # 处理命令行参数
+    if len(sys.argv) > 1:
+        # 处理主命令别名
+        if sys.argv[1] in command_aliases:
+            sys.argv[1] = command_aliases[sys.argv[1]]
+        
+        # 处理分组子命令别名
+        if len(sys.argv) > 2 and sys.argv[1] == 'group' and sys.argv[2] in group_command_aliases:
+            sys.argv[2] = group_command_aliases[sys.argv[2]]
+    
     parser = argparse.ArgumentParser(description='GitDiffHelper (GD) - 多仓库Git差异管理工具')
-    subparsers = parser.add_subparsers(dest='command', help='子命令')
+    subparsers = parser.add_subparsers(dest='command', help='子命令', required=False)
     
     # search命令
     search_parser = subparsers.add_parser('search', help='搜索远端仓库')
@@ -584,6 +885,7 @@ def main():
     # status命令
     status_parser = subparsers.add_parser('status', help='查看仓库状态')
     status_parser.add_argument('id', nargs='?', help='仓库ID，不指定则查看所有')
+    status_parser.add_argument('--verbose', '-v', action='store_true', help='显示详细信息')
     
     # sync命令
     sync_parser = subparsers.add_parser('sync', help='同步仓库并创建MR')
@@ -615,6 +917,13 @@ def main():
     group_rm_parser = group_subparsers.add_parser('rm', help='删除分组')
     group_rm_parser.add_argument('name', help='分组名称')
     
+    # group set命令
+    group_set_parser = group_subparsers.add_parser('set', help='设置当前分组')
+    group_set_parser.add_argument('name', help='分组名称')
+    
+    # group current命令
+    group_subparsers.add_parser('current', help='查看当前分组')
+    
     args = parser.parse_args()
     
     helper = GitDiffHelper()
@@ -628,7 +937,7 @@ def main():
     elif args.command == 'verify':
         helper.verify()
     elif args.command == 'status':
-        asyncio.run(helper.status(args.id))
+            asyncio.run(helper.status(args.id, args.verbose))
     elif args.command == 'sync':
         helper.sync(args.id, args.to_master)
     elif args.command == 'tag':
@@ -642,6 +951,10 @@ def main():
             helper.group_list()
         elif args.group_command == 'rm':
             helper.group_rm(args.name)
+        elif args.group_command == 'set':
+            helper.group_set(args.name)
+        elif args.group_command == 'current':
+            helper.group_current()
         else:
             group_parser.print_help()
     else:
